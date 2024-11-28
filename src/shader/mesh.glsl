@@ -21,6 +21,7 @@ const float PI = 3.1415926535897932384626433832795;
 out float v_height;
 out float is_skirt;
 out float v_hillshade;
+out vec3 v_meshNormal;
 
 ////////////////////////////////////////////
 /////////// DEM 
@@ -31,23 +32,29 @@ vec4 tileUvToDemSample(vec2 uv, float dem_size, float dem_scale, vec2 dem_tl) {
     return vec4((pos - f + 0.5) / (dem_size + 2.0), f);
 }
 
-float elevation(vec2 apos) {
-
-    // float dd = 1.0 / (u_dem_size + 2.0);
-    // vec4 r = tileUvToDemSample(apos / 8192.0, u_dem_size, u_dem_scale, u_dem_tl);
-    // vec2 pos = r.xy;
-    // vec2 f = r.zw;
-
-    // float tl = texture(float_dem_texture, pos).r;
-    // float tr = texture(float_dem_texture, pos + vec2(dd, 0)).r;
-    // float bl = texture(float_dem_texture, pos + vec2(0, dd)).r;
-    // float br = texture(float_dem_texture, pos + vec2(dd, dd)).r;
-
-    // return mix(mix(tl, tr, f.x), mix(bl, br, f.x), f.y);
-
+float singleElevation(vec2 apos) {
     vec2 pos = (u_dem_size * (apos / 8192.0 * u_dem_scale + u_dem_tl) + 1.0) / (u_dem_size + 2.0);
     float m = texture(float_dem_texture, pos).r;
     return m;
+}
+
+float elevation(vec2 apos) {
+
+    float dd = 1.0 / (u_dem_size + 2.0);
+    vec4 r = tileUvToDemSample(apos / 8192.0, u_dem_size, u_dem_scale, u_dem_tl);
+    vec2 pos = r.xy;
+    vec2 f = r.zw;
+
+    float tl = texture(float_dem_texture, pos).r;
+    float tr = texture(float_dem_texture, pos + vec2(dd, 0)).r;
+    float bl = texture(float_dem_texture, pos + vec2(0, dd)).r;
+    float br = texture(float_dem_texture, pos + vec2(dd, dd)).r;
+
+    return mix(mix(tl, tr, f.x), mix(bl, br, f.x), f.y);
+
+    // vec2 pos = (u_dem_size * (apos / 8192.0 * u_dem_scale + u_dem_tl) + 1.0) / (u_dem_size + 2.0);
+    // float m = texture(float_dem_texture, pos).r;
+    // return m;
 }
 
 vec3 decomposeToPosAndSkirt(vec2 posWithComposedSkirt) {
@@ -76,6 +83,35 @@ float calcAzimuth(float azimuthDegree) {
     // 入射方向
     float validAzimuthDegree = mod(azimuthDegree + 360.0, 360.0);
     return deg2rad(360.0 - validAzimuthDegree + 90.0);
+}
+
+vec3 calcMeshNormal(vec2 apos) {
+
+    ///////////////
+    // a,  b,  c,
+    // d,  e,  f,
+    // g,  h,  i
+    //////////////
+    float factor = 1.0;
+    float b = elevation(apos + vec2(0.0, 1.0 * factor));
+    float d = elevation(apos + vec2(-1.0 * factor, 0.0));
+    float f = elevation(apos + vec2(1.0 * factor, 0.0));
+    float h = elevation(apos + vec2(0.0, -1.0 * factor));
+
+    float tr = f; // E
+    float bl = b; // N
+    float eS = h; // S
+    float eW = d; // W
+
+    vec3 dx = normalize(vec3(1.0, 0.0, (tr - eW) * u_exaggeration));
+    vec3 dy = normalize(vec3(0.0, 1.0, (bl - eS) * u_exaggeration));
+    // vec3 dx = normalize(vec3(1.0, 0.0, tr - eW));
+    // vec3 dy = normalize(vec3(0.0, 1.0, bl - eS));
+
+    vec3 normal = normalize(cross(dx, dy));
+
+    return normal;
+
 }
 
 vec2 calcSlopeAndAspect(vec2 apos) {
@@ -124,19 +160,24 @@ void main() {
     float skirt = pos_skirt.z;
 
     float height = elevation(pos);
-    float z = height * u_exaggeration - skirt * u_skirt_height;
+    // float z = height * u_exaggeration - skirt * u_skirt_height;
+    float z = height * u_exaggeration;
     gl_Position = u_matrix * vec4(pos.xy, z, 1.0);
 
     /// HillShade ///
-    float zenithRad = calcZenith(u_altitudeDegree);
-    float azimuthRad = calcAzimuth(u_azimuthDegree);
-    vec2 slope_aspect = calcSlopeAndAspect(pos);
+    // float zenithRad = calcZenith(u_altitudeDegree);
+    // float azimuthRad = calcAzimuth(u_azimuthDegree);
+    // vec2 slope_aspect = calcSlopeAndAspect(pos);
+    // float hillShade = calcHillShade(zenithRad, azimuthRad, slope_aspect.x, slope_aspect.y);
+    float hillShade = 1.0;
 
-    float hillShade = calcHillShade(zenithRad, azimuthRad, slope_aspect.x, slope_aspect.y);
+    /// normal ///
+    vec3 meshNormal = calcMeshNormal(pos);
 
     v_height = height;
     is_skirt = skirt;
     v_hillshade = hillShade;
+    v_meshNormal = meshNormal;
 }
 #endif
 
@@ -146,10 +187,36 @@ precision highp float;
 in float v_height;
 in float is_skirt;
 in float v_hillshade;
+in vec3 v_meshNormal;
+
+uniform float u_rand;
 
 out vec4 outColor;//OUTPUT RG32F
 
 const float SKIRT_HEIGHT_FLAG = 24575.0;
+
+vec3 colorMap(uint index) {
+    // 定义一个包含11个vec3类型颜色的数组作为调色板
+    vec3 palette[11] = vec3[](
+        vec3(158.0 / 255.0, 1.0 / 255.0, 66.0 / 255.0),
+        vec3(213.0 / 255.0, 62.0 / 255.0, 79.0 / 255.0),
+        vec3(244.0 / 255.0, 109.0 / 255.0, 67.0 / 255.0),
+        vec3(253.0 / 255.0, 174.0 / 255.0, 97.0 / 255.0),
+        vec3(254.0 / 255.0, 224.0 / 255.0, 139.0 / 255.0),
+        vec3(255.0 / 255.0, 255.0 / 255.0, 191.0 / 255.0),
+        vec3(230.0 / 255.0, 245.0 / 255.0, 152.0 / 255.0),
+        vec3(171.0 / 255.0, 221.0 / 255.0, 164.0 / 255.0),
+        vec3(102.0 / 255.0, 194.0 / 255.0, 165.0 / 255.0),
+        vec3(50.0 / 255.0, 136.0 / 255.0, 189.0 / 255.0),
+        vec3(94.0 / 255.0, 79.0 / 255.0, 162.0 / 255.0)
+    );
+
+    // 根据传入的索引返回对应的颜色，如果索引超出范围（这里简单返回黑色作为示例，实际可按需处理）
+    if (index < 11u) {
+        return palette[index];
+    }
+    return vec3(0.0, 0.0, 0.0);
+}
 
 void main() {
     // float height = v_height;
@@ -158,6 +225,11 @@ void main() {
     // }
     // float hs = 1.0;
     // outColor = vec4((v_height + 60.0) / 70.0, 0.4, 0.45, 1.0);
-    outColor = vec4(v_height, v_hillshade, 0.0, 0.0);
+    // outColor = vec4(v_height, v_hillshade, 0.0, 0.0);
+    // outColor = vec4(v_height, v_meshNormal);
+    outColor = vec4(v_height, v_meshNormal);
+
+    // outColor = vec4(colorMap(uint(u_rand)%11u), 1.0);
+
 }
 #endif
